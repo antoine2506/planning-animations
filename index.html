@@ -837,7 +837,7 @@ function boundaryLabel(h) { return String(h).padStart(2, "0") + ":00"; }
 const sb = (SUPABASE_URL.startsWith("http")) ? supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
 let state = {
-  view: "dashboard", // dashboard | planning | week | trames | lookup | admin
+  view: "dashboard", // dashboard | planning | week | trames | lookup | admin | reports
   today: new Date(),
   visibleMonth: new Date(),
   selectedDate: null,
@@ -855,7 +855,10 @@ let state = {
   notifications: [],
   filters: { status: "all", category: "all", target: "all" },
   adminStatsPeriod: "week",
-  adminStatsTab: "overview"
+  adminStatsTab: "overview",
+  reportPeriod: "week",
+  reportCustomStart: "",
+  reportCustomEnd: ""
 };
 
 const app = document.getElementById("app");
@@ -1028,7 +1031,8 @@ function render() {
   else if (state.view === "trames") renderTrames();
   else if (state.view === "lookup") renderLookup();
   else if (state.view === "admin") renderAdmin();
-  setTimeout(()=>{if(!document.querySelector('.build-version')){const v=document.createElement('div');v.className='build-version';v.textContent='Version 18/09 · master-v4 valeurs';document.body.appendChild(v);}},0);
+  else if (state.view === "reports") renderReports();
+  setTimeout(()=>{if(!document.querySelector('.build-version')){const v=document.createElement('div');v.className='build-version';v.textContent='Version 18/09 · master-v5 rapports';document.body.appendChild(v);}},0);
 }
 
 function navIcon(name) {
@@ -1070,6 +1074,7 @@ function topbar(active) {
         <button data-nav="lookup" class="${active === 'lookup' ? 'active' : ''}">${navIcon('lookup')}Suivre une demande</button>
         <button type="button" class="admin-mode-btn ${state.adminMode ? 'active' : ''}" data-admin-mode title="${state.adminMode ? 'Désactiver le mode admin' : 'Activer le mode admin'}">${navIcon('admin')}${state.adminMode ? 'Mode admin ON' : 'Mode admin'}</button>
         <button data-nav="admin" class="${active === 'admin' ? 'active' : ''}">${navIcon('admin')}Admin</button>
+        ${state.adminAuthed ? `<button data-nav="reports" class="${active === 'reports' ? 'active' : ''}">📊 Rapports</button>` : ""}
         <button type="button" class="notification-btn" data-notifications aria-label="Notifications" title="Centre des notifications"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg>${state.notifications.length ? `<span class="notification-badge">${Math.min(99,state.notifications.length)}</span>` : ''}</button>
         <button class="theme-toggle" type="button" onclick="toggleTheme()" aria-label="Changer le thème" title="${document.documentElement.dataset.theme === 'dark' ? 'Passer en mode jour' : 'Passer en mode nuit'}">${themeIcon()}</button>
       </div>
@@ -1488,7 +1493,7 @@ function openJoinForm(reservation, dateStr, slotIdx) {
 
 function bindNav() {
   document.querySelectorAll("[data-nav]").forEach(el => {
-    el.onclick = async () => { state.view = el.dataset.nav; if (state.view === "week") { if (!state.selectedDate) state.selectedDate = toDateStr(new Date()); await loadWeekData(); } if (state.view === "dashboard") await loadDashboardData(); if (state.view === "trames") await loadTrameData(); if (state.view === "admin" && state.adminAuthed) await loadAdminData(); render(); };
+    el.onclick = async () => { state.view = el.dataset.nav; if (state.view === "week") { if (!state.selectedDate) state.selectedDate = toDateStr(new Date()); await loadWeekData(); } if (state.view === "dashboard") await loadDashboardData(); if (state.view === "trames") await loadTrameData(); if ((state.view === "admin" || state.view === "reports") && state.adminAuthed) await loadAdminData(); render(); };
   });
   bindGlobalControls();
 }
@@ -1774,6 +1779,43 @@ function renderLookup() {
 }
 
 /* ================== ADMIN ================== */
+function renderReports() {
+  if (!state.adminAuthed) { state.view = "admin"; renderAdmin(); return; }
+  const now=new Date(); now.setHours(0,0,0,0);
+  const key=state.reportPeriod||"week";
+  let start=null,end=new Date(now),label="Cette semaine";
+  if(key==="week"){const dow=(now.getDay()+6)%7;start=new Date(now);start.setDate(start.getDate()-dow);label="Cette semaine";}
+  else if(key==="7d"){start=new Date(now);start.setDate(start.getDate()-6);label="7 derniers jours";}
+  else if(key==="30d"){start=new Date(now);start.setDate(start.getDate()-29);label="30 derniers jours";}
+  else if(key==="month"){start=new Date(now.getFullYear(),now.getMonth(),1);label="Ce mois";}
+  else if(key==="90d"){start=new Date(now);start.setDate(start.getDate()-89);label="3 derniers mois";}
+  else if(key==="custom"){
+    start=state.reportCustomStart?new Date(state.reportCustomStart+"T00:00:00"):null;
+    end=state.reportCustomEnd?new Date(state.reportCustomEnd+"T23:59:59"):new Date(now);
+    label=(state.reportCustomStart||"Début")+" → "+(state.reportCustomEnd||"Aujourd’hui");
+  } else {start=null;label="Tout l’historique";}
+  const inRange=d=>{if(!d)return false;const x=new Date(d+"T00:00:00");return(!start||x>=start)&&x<=end;};
+  const reservations=(state.adminReservations||[]).filter(r=>inRange(r.date));
+  const active=reservations.filter(r=>r.status!=="cancelled"&&r.status!=="rejected");
+  const activeIds=new Set(active.map(r=>String(r.id)));
+  const participants=(state.adminParticipants||[]).filter(p=>activeIds.has(String(p.reservation_id)));
+  const duration=r=>Math.max(0,Number(r.end_idx||0)-Number(r.start_idx||0));
+  const norm=v=>String(v||"").trim().toLowerCase();
+  const people=new Map();
+  const ensure=(discord,name)=>{const key=norm(discord)||norm(name);if(!key)return null;if(!people.has(key))people.set(key,{key,name:name||"—",discord:discord||"—",joined:0,joinedHours:0,proposed:0,proposedHours:0,realizedProposed:0,cancelledProposed:0,trames:0,events:0,animations:0,server:0,days:new Set(),cats:new Map(),targets:new Map(),last:null,first:null});const a=people.get(key);if(a.name==="—"&&name)a.name=name;if(a.discord==="—"&&discord)a.discord=discord;return a;};
+  const touch=(a,r)=>{const d=new Date(r.date+"T00:00:00");a.days.add(r.date);if(!a.last||d>a.last)a.last=d;if(!a.first||d<a.first)a.first=d;};
+  participants.forEach(p=>{const a=ensure(p.animator_discord,p.animator_name);if(!a)return;const r=active.find(x=>String(x.id)===String(p.reservation_id));if(!r)return;a.joined++;a.joinedHours+=duration(r);touch(a,r);const c=categoryLabel(r.category);a.cats.set(c,(a.cats.get(c)||0)+1);const t=r.target_type==="autre"?(r.target_other||"Autre"):(r.target_type||"—");a.targets.set(t,(a.targets.get(t)||0)+1);if(r.category==="trame")a.trames++;else if(r.category==="event")a.events++;else a.animations++;if(r.target_type==="serveur")a.server++;});
+  reservations.forEach(r=>{const a=ensure(r.requester_discord,r.requester_name);if(!a)return;touch(a,r);if(r.status==="cancelled"||r.status==="rejected"){a.cancelledProposed++;return;}a.proposed++;a.proposedHours+=duration(r);if(r.realized!==false)a.realizedProposed++;});
+  const arr=[...people.values()].sort((a,b)=>b.joined-a.joined||b.joinedHours-a.joinedHours||b.proposed-a.proposed||a.name.localeCompare(b.name));
+  const totalJoined=arr.reduce((n,a)=>n+a.joined,0),totalHours=arr.reduce((n,a)=>n+a.joinedHours,0),totalProposed=arr.reduce((n,a)=>n+a.proposed,0);
+  const rows=arr.map((a,i)=>{const fav=[...a.cats.entries()].sort((x,y)=>y[1]-x[1])[0]?.[0]||"—";const favTarget=[...a.targets.entries()].sort((x,y)=>y[1]-x[1])[0]?.[0]||"—";const avg=a.joined?a.joinedHours/a.joined:0;return `<tr><td><span class="ranking-medal">${i+1}</span></td><td><div class="analytics-name-cell"><strong>${escapeHtml(a.name)}</strong><span>${escapeHtml(a.discord)}</span></div></td><td><strong>${a.joined}</strong></td><td><strong>${a.joinedHours}h</strong><br><span class="muted">${avg.toFixed(1)}h / anim</span></td><td><strong>${a.proposed}</strong><br><span class="muted">${a.proposedHours}h demandées</span></td><td>${a.realizedProposed}<br><span class="muted">${a.cancelledProposed} annulée(s)/refusée(s)</span></td><td>${a.trames} / ${a.events} / ${a.animations}</td><td>${a.server}</td><td>${a.days.size}</td><td>${escapeHtml(fav)}<br><span class="muted">Cible : ${escapeHtml(favTarget)}</span></td><td>${a.first?a.first.toLocaleDateString("fr-FR"):"—"}<br><span class="muted">→ ${a.last?a.last.toLocaleDateString("fr-FR"):"—"}</span></td></tr>`;}).join("");
+  app.innerHTML=`${topbar("reports")}<div class="admin-analytics-head"><div><h2>📊 Rapport détaillé des animateurs</h2><p>${escapeHtml(label)} · participation, propositions et activité individuelle.</p></div><button class="btn secondary" id="report-refresh">↻ Actualiser</button></div><div class="analytics-periods" style="margin-bottom:14px">${[["week","Cette semaine"],["7d","7 jours"],["30d","30 jours"],["month","Ce mois"],["90d","3 mois"],["all","Tout"],["custom","Personnalisé"]].map(([k,l])=>`<button class="analytics-period-btn ${key===k?'active':''}" data-report-period="${k}">${l}</button>`).join("")}</div>${key==="custom"?`<div class="card" style="display:grid;grid-template-columns:1fr 1fr auto;gap:12px;align-items:end"><div><label>Du</label><input type="date" id="report-start" value="${state.reportCustomStart}"></div><div><label>Au</label><input type="date" id="report-end" value="${state.reportCustomEnd}"></div><button class="btn" id="report-apply">Appliquer</button></div>`:""}<div class="analytics-kpis"><div class="analytics-kpi"><div class="kpi-label">Animateurs actifs</div><div class="kpi-value">${arr.filter(a=>a.joined>0).length}</div><div class="kpi-trend neutral">${arr.length} profils recensés</div></div><div class="analytics-kpi"><div class="kpi-label">Participations</div><div class="kpi-value">${totalJoined}</div><div class="kpi-trend neutral">Animations rejointes</div></div><div class="analytics-kpi"><div class="kpi-label">Heures équipe</div><div class="kpi-value">${totalHours}h</div><div class="kpi-trend neutral">Heures cumulées</div></div><div class="analytics-kpi"><div class="kpi-label">Animations proposées</div><div class="kpi-value">${totalProposed}</div><div class="kpi-trend neutral">Demandes actives</div></div></div><div class="card analytics-card"><div class="analytics-section-title"><div><h3>Détail par animateur</h3><p class="analytics-card-sub" style="margin:4px 0 0">Trames / Events / Anim. = répartition des animations rejointes. Les propositions sont reliées par Discord en priorité, sinon par pseudo.</p></div><span class="analytics-badge">${arr.length} profil(s)</span></div><div style="overflow:auto"><table class="admin-table analytics-ranking-table" style="min-width:1450px"><thead><tr><th>#</th><th>Animateur</th><th>Anims rejointes</th><th>Heures</th><th>Proposées</th><th>Propositions réalisées</th><th>Trames / Events / Anim.</th><th>Serveur</th><th>Jours actifs</th><th>Préférences</th><th>1re / dernière activité</th></tr></thead><tbody>${rows||`<tr><td colspan="11" class="muted">Aucune donnée sur cette période.</td></tr>`}</tbody></table></div></div>`;
+  bindNav();
+  document.querySelectorAll("[data-report-period]").forEach(b=>b.onclick=()=>{state.reportPeriod=b.dataset.reportPeriod;render();});
+  const refresh=document.getElementById("report-refresh");if(refresh)refresh.onclick=async()=>{refresh.disabled=true;await loadAdminData();refresh.disabled=false;render();};
+  const apply=document.getElementById("report-apply");if(apply)apply.onclick=()=>{state.reportCustomStart=document.getElementById("report-start").value;state.reportCustomEnd=document.getElementById("report-end").value;render();};
+}
+
 function renderAdmin() {
   if (!state.adminAuthed) {
     app.innerHTML = `
